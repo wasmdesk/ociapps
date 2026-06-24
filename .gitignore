@@ -1,0 +1,20 @@
+# Build artifacts
+*.wasm
+/bin/
+/_oci/
+/_oci-*/
+/dist/
+
+# Go cruft
+*.test
+*.out
+*.prof
+coverage.out
+coverage.txt
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
