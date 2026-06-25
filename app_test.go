@@ -193,6 +193,92 @@ func TestParseRef_Permutations(t *testing.T) {
 	}
 }
 
+// TestLoadApp_PartialFailure pins the realistic cluster scenario where
+// R1 serves the manifest just fine but one of its blobs is missing
+// (registry partially rebuilt, broken mirror, garbage collected blob,
+// ...). Without per-blob fallback the load would die on the missing
+// blob even though R2 holds it. With fallback the loader transparently
+// pulls the missing layer from R2 and the App is fully populated.
+//
+// This is the loader-level analogue of
+// TestResolver_ClusterFallback_BlobR1ConnRefused_R2Serves.
+func TestLoadApp_PartialFailure(t *testing.T) {
+	files := map[string][]byte{
+		"worker.js":    []byte("// worker"),
+		"wasm_exec.js": []byte("// exec"),
+		"app.wasm":     []byte("\x00asm\x01\x00\x00\x00"),
+	}
+	missingDigest := Sha256Digest(files["app.wasm"])
+
+	// R2 is the healthy registry -- it has every blob.
+	_, r2 := newFakeRegistry(t, "wasmdesk/partial", files)
+
+	// R1 serves the SAME manifest (we forge one ourselves so R1 + R2
+	// agree on the layer digests) but 404s on the app.wasm blob; the
+	// other two blobs are served from R1.
+	layers := make([]Descriptor, 0, len(files))
+	annotations := make(map[string]string, len(files))
+	r1Blobs := make(map[string][]byte, len(files))
+	for name, body := range files {
+		d := Sha256Digest(body)
+		layers = append(layers, Descriptor{
+			MediaType: MediaTypeLayerOctet, Digest: d, Size: int64(len(body)),
+		})
+		annotations[AnnotationPathPrefix+name] = d
+		if d != missingDigest {
+			r1Blobs[d] = body
+		}
+	}
+	m := &Manifest{
+		SchemaVersion: 2,
+		MediaType:     MediaTypeManifest,
+		Config:        Descriptor{MediaType: MediaTypeConfig, Digest: Sha256Digest([]byte("cfg")), Size: 3},
+		Layers:        layers,
+		Annotations:   annotations,
+	}
+	r1Blobs[m.Config.Digest] = []byte("cfg")
+	manifestBody, err := EncodeManifest(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingHits := 0
+	r1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch {
+		case strings.Contains(req.URL.Path, "/manifests/"):
+			w.Header().Set("Content-Type", MediaTypeManifest)
+			w.Write(manifestBody)
+		case strings.Contains(req.URL.Path, "/blobs/"):
+			d := req.URL.Path[strings.LastIndex(req.URL.Path, "/")+1:]
+			if b, ok := r1Blobs[d]; ok {
+				w.Write(b)
+				return
+			}
+			missingHits++
+			http.NotFound(w, req)
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	t.Cleanup(r1.Close)
+
+	r := &Resolver{Registries: []Registry{{URL: r1.URL}, {URL: r2.URL}}}
+	app, err := r.LoadApp(context.Background(), "wasmdesk/partial:latest")
+	if err != nil {
+		t.Fatalf("LoadApp with R1 partial-failure must fall through to R2: %v", err)
+	}
+	if len(app.Files) != len(files) {
+		t.Fatalf("want %d files, got %d", len(files), len(app.Files))
+	}
+	for name, body := range files {
+		if got := app.Files[name]; string(got) != string(body) {
+			t.Errorf("%s mismatch: want %q, got %q", name, body, got)
+		}
+	}
+	if missingHits == 0 {
+		t.Error("R1 was never queried for the missing blob -- test is not exercising the partial-failure path")
+	}
+}
+
 // TestApp_JSONSurface confirms App marshals cleanly to JSON if a
 // consumer wants to dump it (defensive sanity, not a contract).
 func TestApp_JSONSurface(t *testing.T) {

@@ -332,3 +332,135 @@ func TestResolver_CustomCache(t *testing.T) {
 		t.Errorf("want 1 put + 1 get, got puts=%d gets=%d", cache.puts, cache.gets)
 	}
 }
+
+// --- Cluster-fallback E2E tests ------------------------------------------
+//
+// These pin the OCI cluster-fallback contract end-to-end on the Go side:
+// registry R1 is unhealthy (or missing the requested artefact), registry
+// R2 is healthy and serves the SAME digest. The Resolver must fall through
+// transparently and the caller must end up holding the bytes from R2 with
+// digest verification still applied. They are the Go twin of the browser
+// probe in wasmbox/test/probe-cluster-fallback.mjs.
+
+// TestResolver_ClusterFallback_ManifestFirstRegistry5xx pins the manifest
+// branch: R1 returns 503 on every request, R2 serves the canned manifest;
+// FetchManifest must return the manifest body decoded from R2 and report
+// R2 as the winning Registry so a follow-up FetchBlob can prefer the same
+// mirror for affinity.
+func TestResolver_ClusterFallback_ManifestFirstRegistry5xx(t *testing.T) {
+	// R1: every manifest GET is hard-503 (Service Unavailable).
+	r1Hits := 0
+	r1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		r1Hits++
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(r1.Close)
+	// R2: healthy fake registry with one layer.
+	_, r2 := newFakeRegistry(t, "cluster/app", map[string][]byte{"app.wasm": []byte("OK-R2")})
+
+	r := &Resolver{Registries: []Registry{{URL: r1.URL}, {URL: r2.URL}}}
+	winning, m, err := r.FetchManifest(context.Background(), "cluster/app", "latest")
+	if err != nil {
+		t.Fatalf("expected fallback to R2 to succeed: %v", err)
+	}
+	if winning.URL != r2.URL {
+		t.Errorf("winning registry: want %s (R2), got %s", r2.URL, winning.URL)
+	}
+	if r1Hits != 1 {
+		t.Errorf("R1 should have been tried exactly once, got %d hits", r1Hits)
+	}
+	if m == nil || m.SchemaVersion != 2 || len(m.Layers) != 1 {
+		t.Errorf("manifest from R2 looks wrong: %+v", m)
+	}
+}
+
+// TestResolver_ClusterFallback_BlobR1ConnRefused_R2Serves pins the blob
+// branch with a transport-level failure on R1 (the listener is closed
+// before the call, so the Resolver gets ECONNREFUSED / "no such host"
+// rather than an HTTP status). R2 then serves the digest, the Resolver
+// verifies the digest, and reports R2 as the served-from Registry.
+func TestResolver_ClusterFallback_BlobR1ConnRefused_R2Serves(t *testing.T) {
+	// R1: spin up, capture the URL, then close so any subsequent dial fails.
+	r1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// never reached
+		http.Error(w, "unreachable", http.StatusTeapot)
+	}))
+	r1URL := r1.URL
+	r1.Close() // dial against r1URL now fails fast (no listener).
+
+	// R2: serves the same payload R1 was supposed to.
+	payload := []byte("CLUSTER-PAYLOAD-FROM-R2")
+	_, r2 := newFakeRegistry(t, "cluster/app", map[string][]byte{"app.wasm": payload})
+
+	r := &Resolver{Registries: []Registry{{URL: r1URL}, {URL: r2.URL}}}
+	digest := Sha256Digest(payload)
+	served, body, err := r.FetchBlob(context.Background(), "cluster/app", digest)
+	if err != nil {
+		t.Fatalf("expected R2 to serve after R1 conn-refused: %v", err)
+	}
+	if served.URL != r2.URL {
+		t.Errorf("served-from: want %s (R2), got %s", r2.URL, served.URL)
+	}
+	if string(body) != string(payload) {
+		t.Errorf("body mismatch: want %q, got %q", payload, body)
+	}
+	// Re-verify digest explicitly so the test pins that VerifyDigest ran
+	// (the Resolver would have errored out before returning if it had not).
+	if err := VerifyDigest(body, digest); err != nil {
+		t.Errorf("digest re-verify failed: %v", err)
+	}
+}
+
+// TestResolver_ClusterFallback_CacheCrossRegistryHit pins the content-
+// addressable cache: a blob fetched from R2 must satisfy a SECOND fetch
+// for the same digest after R2 itself is taken down -- the cache key is
+// the digest, not the (registry, digest) pair, so a hit is registry-
+// agnostic. This is the property that lets the cluster scale: once any
+// healthy mirror has served a blob, every consumer is independent of
+// every mirror.
+func TestResolver_ClusterFallback_CacheCrossRegistryHit(t *testing.T) {
+	// R1 always 503 so the first fetch falls through to R2.
+	r1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(r1.Close)
+	// R2 serves the canned bytes once, then we close it.
+	payload := []byte("CONTENT-ADDRESSED-XREGISTRY")
+	_, r2 := newFakeRegistry(t, "cluster/app", map[string][]byte{"app.wasm": payload})
+	digest := Sha256Digest(payload)
+
+	cache := &recordingCache{}
+	r := &Resolver{
+		Registries: []Registry{{URL: r1.URL}, {URL: r2.URL}},
+		Cache:      cache,
+	}
+
+	// First call: R1 fails, R2 serves, cache.Put runs once.
+	if _, body, err := r.FetchBlob(context.Background(), "cluster/app", digest); err != nil {
+		t.Fatalf("first fetch: %v", err)
+	} else if string(body) != string(payload) {
+		t.Errorf("first body: want %q, got %q", payload, body)
+	}
+	if cache.puts != 1 {
+		t.Errorf("want 1 put after R2 served, got %d", cache.puts)
+	}
+
+	// Take R2 down so any network call would fail. Cache hit must rescue us.
+	r2.Close()
+
+	got, body, err := r.FetchBlob(context.Background(), "cluster/app", digest)
+	if err != nil {
+		t.Fatalf("second fetch (should be cache hit): %v", err)
+	}
+	if string(body) != string(payload) {
+		t.Errorf("second body: want %q, got %q", payload, body)
+	}
+	// Cache-hit short-circuit returns an empty Registry (no mirror served).
+	if got.URL != "" {
+		t.Errorf("cache hit should report empty Registry, got %q", got.URL)
+	}
+	// Cache.Put must NOT have been called again -- the second call was a hit.
+	if cache.puts != 1 {
+		t.Errorf("second fetch should not have written cache; puts=%d", cache.puts)
+	}
+}
