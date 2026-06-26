@@ -34,6 +34,9 @@ import (
 
 var osExit = os.Exit
 
+// osGetenv is a test seam for the credential lookup.
+var osGetenv = os.Getenv
+
 func main() {
 	if code := run(os.Args[1:], os.Stdout, os.Stderr); code != 0 {
 		osExit(code)
@@ -52,6 +55,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	in := fs.String("in", "_oci", "OCI image-layout input directory")
 	ref := fs.String("ref", "", "Target reference, e.g. localhost:5000/wasmdesk/terminal:latest")
 	scheme := fs.String("scheme", "http", "URL scheme to dial the registry on (http|https)")
+	username := fs.String("username", "", "registry username for token auth (e.g. a ghcr.io push); the password is read from $GHCR_TOKEN or $GITHUB_TOKEN")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -66,6 +70,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	baseURL := *scheme + "://" + registry
 	p := &ociapps.Pusher{BaseURL: baseURL}
+	// Wrap the client with registry token auth when a credential is present —
+	// ghcr.io (and any token-gated registry) needs it for push. A local
+	// unauthenticated registry (localhost:5000) supplies no token, so the
+	// wrapper is omitted and behaviour is unchanged.
+	if pw := osGetenv("GHCR_TOKEN"); pw != "" {
+		p.Client = &ociapps.TokenAuthDoer{Username: *username, Password: pw}
+	} else if pw := osGetenv("GITHUB_TOKEN"); pw != "" {
+		p.Client = &ociapps.TokenAuthDoer{Username: *username, Password: pw}
+	}
 	digest, err := pushLayoutFn(p, *in, repo, tag)
 	if err != nil {
 		fmt.Fprintln(stderr, "ociapps-push:", err)

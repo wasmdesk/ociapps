@@ -165,6 +165,45 @@ func TestRun_PushErr(t *testing.T) {
 	}
 }
 
+func TestRun_AuthWiring(t *testing.T) {
+	origGet, origPush := osGetenv, pushLayoutFn
+	defer func() { osGetenv, pushLayoutFn = origGet, origPush }()
+
+	var captured *ociapps.Pusher
+	pushLayoutFn = func(p *ociapps.Pusher, _, _, _ string) (string, error) {
+		captured = p
+		return "sha256:x", nil
+	}
+
+	cases := []struct {
+		name     string
+		env      map[string]string
+		wantAuth bool
+	}{
+		{"ghcr-token", map[string]string{"GHCR_TOKEN": "tok"}, true},
+		{"github-token-fallback", map[string]string{"GITHUB_TOKEN": "tok"}, true},
+		{"no-creds", map[string]string{}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			osGetenv = func(k string) string { return c.env[k] }
+			captured = nil
+			var out, errb bytes.Buffer
+			code := run([]string{"-in", "x", "-ref", "ghcr.io/wasmdesk/hello:latest", "-scheme", "https", "-username", "u"}, &out, &errb)
+			if code != 0 {
+				t.Fatalf("run=%d: %s", code, errb.String())
+			}
+			d, isAuth := captured.Client.(*ociapps.TokenAuthDoer)
+			if isAuth != c.wantAuth {
+				t.Fatalf("auth wired=%v want=%v", isAuth, c.wantAuth)
+			}
+			if c.wantAuth && (d.Username != "u" || d.Password != "tok") {
+				t.Errorf("creds = %q/%q", d.Username, d.Password)
+			}
+		})
+	}
+}
+
 func TestParseRef_All(t *testing.T) {
 	cases := []struct {
 		in                  string
