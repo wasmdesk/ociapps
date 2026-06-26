@@ -1,0 +1,68 @@
+# CI for ociapps — pure-Go (CGO=0) OCI app packaging for wasmdesk.
+#
+#   test  — go vet + go test with a 100% statement-coverage gate (the whole
+#           module is at 100%; the gate keeps it there).
+#   build — cross-compile ./... for every 64-bit target Go supports, so the
+#           pack/push/static tooling is proven to build everywhere (the code is
+#           portable Go with no arch-specific paths, so a build check suffices —
+#           no qemu test run needed).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  GOWORK: "off"
+  CGO_ENABLED: "0"
+
+jobs:
+  test:
+    name: Test + 100% coverage gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          check-latest: true
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: go test + coverage
+        run: go test -count=1 -covermode=atomic -coverprofile=cover.out ./...
+      - name: Enforce 100% coverage
+        run: |
+          total="$(go tool cover -func=cover.out | awk '/^total:/ {print $3}')"
+          echo "total coverage: $total"
+          pct="${total%\%}"
+          if [ -z "$pct" ] || awk "BEGIN { exit !($pct < 100.0) }"; then
+            echo "::error::coverage '${total:-none}' is below the 100.0% gate"
+            go tool cover -func=cover.out | awk '$3 != "100.0%"'
+            exit 1
+          fi
+
+  build:
+    name: Cross-compile (${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64, riscv64, loong64, ppc64le, s390x]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          check-latest: true
+          cache: true
+      - name: Build ./... for linux/${{ matrix.goarch }}
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: go build ./...
