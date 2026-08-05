@@ -131,7 +131,31 @@ ociapps-push \
   -ref localhost:5000/wasmdesk/terminal:latest
 ```
 
-HTTPS endpoints work transparently when `-scheme=https` is set.
+HTTPS endpoints work transparently when `-scheme=https` is set. **Token auth**
+for push kicks in automatically when a credential is present: pass `-username`
+and set `$GHCR_TOKEN` (or `$GITHUB_TOKEN`), and the pusher wraps its HTTP client
+with a `TokenAuthDoer`, so it can publish straight to **ghcr.io** or any other
+token-gated registry. A local unauthenticated registry (`localhost:5000`) needs
+neither.
+
+### `ociapps-static` -- write a static Distribution v2 `/v2` tree
+
+```sh
+go install github.com/wasmdesk/ociapps/cmd/ociapps-static@latest
+
+ociapps-static -in _oci -repo hello -out site
+# writes site/v2/hello/manifests/<tag> (+ /<digest>) and
+#        site/v2/hello/blobs/sha256:<hex>
+```
+
+`WriteStaticTree` materialises an OCI image-layout directory as a static file
+tree matching the Distribution v2 GET API, so a plain static server — **GitHub
+Pages**, an S3 bucket, `python -m http.server` — can serve it with no registry
+process and no auth. It is the on-disk twin of `ServeLayout`: the browser-side
+`OCIAppsLoader` requests exactly these paths, so a tree written beside the page
+loads **same-origin** — no CORS, no token, no proxy. This is how wasmdesk ships
+the desktop and its apps from one Pages origin while ghcr stays the canonical
+upstream (public registries refuse cross-origin browser reads).
 
 ## Layout
 
@@ -142,12 +166,16 @@ HTTPS endpoints work transparently when `-scheme=https` is set.
 ├── resolver.go        Registry + Resolver + multi-registry fallback
 ├── app.go             App + Resolver.LoadApp
 ├── layout.go          PackLayout + ServeLayout (OCI image-layout)
-├── push.go            Pusher + Distribution v2 PUT machinery
+├── static.go          WriteStaticTree (static /v2 mirror for Pages/S3)
+├── push.go            Pusher + Distribution v2 PUT machinery + TokenAuthDoer
 ├── cache_wasm.go      js/wasm IndexedDB cache (build tag)
 └── cmd/
-    ├── ociapps-pack/  packer CLI
-    └── ociapps-push/  pusher CLI
+    ├── ociapps-pack/    packer CLI
+    ├── ociapps-push/    pure-Go v2 pusher (token auth for ghcr)
+    └── ociapps-static/  static /v2 tree writer
 ```
+
+CI runs `go vet`, a **100% coverage gate**, and a **6-arch cross-compile**.
 
 ## Conventions
 
