@@ -225,7 +225,9 @@ func TestFetchToken_Branches(t *testing.T) {
 		t.Error("want decode error")
 	}
 	// access_token fallback
-	d = &TokenAuthDoer{Base: &fakeDoer{fn: func(*http.Request, int) (*http.Response, error) { return mkResp(200, `{"access_token":"AT"}`, nil), nil }}}
+	d = &TokenAuthDoer{Base: &fakeDoer{fn: func(*http.Request, int) (*http.Response, error) {
+		return mkResp(200, `{"access_token":"AT"}`, nil), nil
+	}}}
 	if tok, err := d.fetchToken("http://ghcr.io/token", "", ""); err != nil || tok != "AT" {
 		t.Errorf("access_token fallback: %q / %v", tok, err)
 	}

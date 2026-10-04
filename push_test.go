@@ -19,15 +19,15 @@ import (
 // returns the "exists" flag from a map; POST blobs/uploads/ returns a
 // 202 + Location; PUT manifests/<tag> returns 201.
 type fakeReceiver struct {
-	mu             sync.Mutex
-	uploadCounter  int
-	receivedBlobs  map[string][]byte
-	manifestPUT    map[string][]byte
-	headExists     map[string]bool
-	failManifestON bool
-	failHeadON     bool
+	mu              sync.Mutex
+	uploadCounter   int
+	receivedBlobs   map[string][]byte
+	manifestPUT     map[string][]byte
+	headExists      map[string]bool
+	failManifestON  bool
+	failHeadON      bool
 	failPOSTuploads bool
-	failPUTblob    bool
+	failPUTblob     bool
 }
 
 func newReceiver() *fakeReceiver {
