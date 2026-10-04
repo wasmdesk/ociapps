@@ -88,9 +88,9 @@ func TestBuildFileMap_HappyPath(t *testing.T) {
 func TestBuildFileMap_EmptyEntries(t *testing.T) {
 	m := &Manifest{
 		Annotations: map[string]string{
-			AnnotationPathPrefix + "":         "sha256:aa",
+			AnnotationPathPrefix + "":          "sha256:aa",
 			AnnotationPathPrefix + "real.wasm": "",
-			AnnotationPathPrefix + "ok.wasm":  "sha256:bb",
+			AnnotationPathPrefix + "ok.wasm":   "sha256:bb",
 		},
 	}
 	fm, err := BuildFileMap(m)

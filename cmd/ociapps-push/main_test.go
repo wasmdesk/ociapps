@@ -206,9 +206,9 @@ func TestRun_AuthWiring(t *testing.T) {
 
 func TestParseRef_All(t *testing.T) {
 	cases := []struct {
-		in                  string
-		reg, repo, tag      string
-		wantErr             bool
+		in             string
+		reg, repo, tag string
+		wantErr        bool
 	}{
 		{"ghcr.io/wasmdesk/term:1.0", "ghcr.io", "wasmdesk/term", "1.0", false},
 		{"localhost:5000/x:y", "localhost:5000", "x", "y", false},
